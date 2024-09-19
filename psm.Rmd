@@ -1,0 +1,282 @@
+---
+title: "Propensity Score Matching (PSM) Analysis"
+author: "Colombiana de Trasplantes"
+date: "2024-07-29"
+output: html_document
+---
+
+```{r}
+# Load necessary libraries
+if (!requireNamespace("MatchIt", quietly = TRUE)) install.packages("MatchIt")
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("readr", quietly = TRUE)) install.packages("readr")
+if (!requireNamespace("cobalt", quietly = TRUE)) install.packages("cobalt")
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+
+library(MatchIt)
+library(dplyr)
+library(readr)
+library(cobalt)
+library(ggplot2)
+```
+
+
+```{r}
+# Download the data from GitHub
+url <- "https://github.com/ColTrasplantes/PSM/raw/main/waitlist_kidney_brazil.csv"
+file_path <- tempfile(fileext = ".csv")  # Create a temporary file path
+download.file(url, destfile = file_path)  # Download the file
+
+# Load the data
+data <- read_csv(file_path)
+
+# Convert column names to valid names and fix character encoding
+# This step ensures that the column names are valid in R (no special characters or spaces) and corrects any character encoding issues that might arise from different operating systems or software.
+colnames(data) <- make.names(colnames(data))
+data <- data %>% mutate_all(~iconv(., from = "latin1", to = "UTF-8"))
+
+# Convert the Transplant_Y_N variable to binary (0 and 1)
+# This conversion is necessary to perform a binary outcome analysis. 
+# In this case, "Sim" (yes) is converted to 1 (indicating the patient received a transplant), and any other value to 0 (did not receive a transplant).
+data <- data %>%
+  mutate(Transplant_Y_N = ifelse(Transplant_Y_N == "Sim", 1, 0))
+```
+
+
+```{r}
+# Recategorize continuous variables for better handling in PSM
+# Age and time on dialysis are recategorized to create meaningful dichotomous variables, which simplifies the matching process and improves interpretability.
+# Age > 50 and Time on Dialysis > 2 years are chosen as clinically significant cut-offs, considering their potential impact on transplant outcomes.
+data <- data %>%
+  mutate(age_at_list_registration_cat = ifelse(age_at_list_registration >= 50, ">=50", "<50"),
+         time_on_Dialysis_cat = ifelse(time_on_Dialysis >= 24, ">=24 months", "<24 months"))
+```
+
+
+```{r}
+# Select the essential variables for PSM
+# The selected variables are key clinical factors such as age, time on dialysis, race, sex, diabetes, blood type, and subregion. 
+# These variables are chosen for their potential to influence the likelihood of receiving a transplant and are included in their recategorized forms where applicable.
+variables <- c("age_at_list_registration_cat", "time_on_Dialysis_cat", "race", "sex", 
+               "diabetes", "Blood_type", "subregion")
+
+# Filter the data to include only relevant variables
+# This step ensures that only the selected variables and the outcome variable (Transplant_Y_N) are retained, reducing unnecessary complexity and focusing the analysis.
+data_filtered <- data %>% select(all_of(variables), Transplant_Y_N)
+
+# Remove rows with missing values
+# Removing rows with any missing values is crucial to avoid biases or errors in the analysis.
+data_filtered <- na.omit(data_filtered)
+
+# Report the sample sizes before matching
+## This is a preliminary step to understand the size of the dataset before any matching is applied.
+print(paste("Sample size before matching: ", nrow(data_filtered)))
+```
+
+
+```{r}
+# Perform the regression before matching
+# A logistic regression model is fitted before matching to understand the initial relationship between diabetes and the likelihood of receiving a transplant.
+# This will serve as a baseline to compare the effect of diabetes before and after matching.
+reg_before <- glm(Transplant_Y_N ~ diabetes, data = data_filtered, family = binomial)
+summary(reg_before)
+```
+
+
+```{r}
+# Matching Process
+# Nearest neighbor matching with a caliper adjustment is applied to ensure high-quality matches.
+# The caliper width is set to 0.1 standard deviations of the logit of the propensity score, which helps ensure that the patients in the treatment and control groups have similar baseline characteristics, minimizing bias.
+set.seed(123)  # Set seed for reproducibility
+matchit_result <- matchit(Transplant_Y_N ~ ., 
+                          data = data_filtered, 
+                          method = "nearest", 
+                          ratio = 1, 
+                          caliper = 0.1)
+
+# Obtain the matched data
+# The matched data is extracted for further analysis. This data now consists of pairs of patients with similar propensity scores, one from the treatment group (received a transplant) and one from the control group (did not receive a transplant).
+matched_data <- match.data(matchit_result)
+```
+
+
+```{r}
+# Report the sample size after matching
+## Reporting the sample size after matching is important because it indicates how many observations were successfully matched.
+## A substantial reduction in sample size could suggest that many patients could not be matched, potentially affecting the generalizability of the results.
+print(paste("Sample size after matching: ", nrow(matched_data)))
+```
+
+
+```{r}
+# Create a simplified Love plot with the recategorized and dichotomous variables
+# The Love plot is a visual tool that compares the balance of covariates before and after matching.
+# This plot helps assess whether the matching process has balanced the covariates between the treatment and control groups.
+var_labels <- c(
+  "sex" = "Sex",
+  "diabetes" = "Diabetes",
+  "age_at_list_registration_cat" = "Age > 50",
+  "time_on_Dialysis_cat" = "Dialysis > 2 years",
+  "Blood_type" = "Blood Type"
+)
+
+love.plot(matchit_result, 
+          stats = "mean.diffs", 
+          drop.distance = TRUE, 
+          abs = TRUE, 
+          var.order = "unadjusted", 
+          var.names = var_labels,
+          thresholds = c(m = 0.1)) + 
+  ggplot2::theme(axis.text.y = element_text(size = 10),  # Adjust Y-axis text size for readability
+                 axis.text.x = element_text(size = 10),
+                 plot.title = element_text(hjust = 0.5, size = 14, face = "bold")) +  # Center title and adjust size
+  ggplot2::labs(title = "Simplified Covariate Balance",
+                x = "Standardized Mean Differences (SMD)",
+                y = "Covariates") +
+  ggplot2::theme_minimal()
+
+# Interpretation: 
+# The Love plot displays standardized mean differences (SMD) for the selected covariates before and after matching.
+# A good balance is indicated when the SMDs for the covariates are close to 0 after matching.
+# The dashed vertical line at 0.1 SMD represents a threshold below which covariate imbalance is considered acceptable.
+```
+
+
+```{r}
+# Generate a table of standardized differences before and after matching
+# The balance table quantitatively assesses the balance of covariates before and after matching, providing numeric evidence of the effectiveness of the matching process.
+balance_table <- bal.tab(matchit_result, un = TRUE)
+
+# Convert row names to a column
+balance_table_df <- as.data.frame(balance_table$Balance)
+balance_table_df$variable <- row.names(balance_table_df)
+
+# Extract the absolute mean differences for selected variables
+selected_balance <- balance_table_df %>%
+  filter(variable %in% names(var_labels)) %>%
+  select(variable, Diff.Un, Diff.Adj)
+
+# Print the selected balance table
+print(selected_balance)
+
+# Define the output file path for saving the balance table
+output_file <- "D:/OneDrive - COLOMBIANA DE TRASPLANTES SAS/metodologicos/psm/analisis/balance_table_waitlist_kidney_brazil.csv"
+
+# Save the balance table to a CSV file
+write.csv(selected_balance, output_file, row.names = FALSE)
+
+# Interpretation:
+# The selected balance table provides a numerical summary of the standardized mean differences before and after matching.
+# This table complements the Love plot by offering precise measurements of how well the matching has balanced each covariate.
+```
+
+
+```{r}
+# Display the first few rows of the matched data with propensity scores
+# This table will include the propensity score and selected variables for the first few observations.
+head_table <- matched_data %>%
+  select(propensity_score = distance, age_at_list_registration_cat, time_on_Dialysis_cat, sex, diabetes, Blood_type, Transplant_Y_N)
+
+# Print the first few rows of the table
+print(head_table)
+
+# Explanation:
+# This table provides a snapshot of the matched dataset, displaying the propensity scores and selected covariates.
+# It allows us to see how patients are matched based on their propensity scores and to verify the distribution of key covariates.
+# The "propensity_score" column shows the estimated probability of receiving a transplant based on the covariates.
+# The other columns show the key variables that were used in the matching process.
+```
+
+
+```{r}
+# Additional Balance Assessment with Visual Tools
+# To further validate the matching process, additional visual tools are used. 
+# These plots provide a deeper understanding of how well the propensity scores and covariates have been balanced between the treated and control groups.
+plot(matchit_result, type = 'jitter') # Jitter plots show the distribution of propensity scores for treated and untreated groups.
+plot(matchit_result, type = 'hist')   # Histogram plots show the distribution of propensity scores across matched groups.
+plot(matchit_result, type = 'qq')     # QQ plots compare the distribution of covariates before and after matching.
+
+# Interpretation:
+# The jitter plot should show a good overlap in the distribution of propensity scores between the treatment and control groups, indicating successful matching.
+# The histogram should demonstrate a more uniform distribution of propensity scores across groups after matching.
+# The QQ plot provides a visual check for the distributional similarity of covariates before and after matching.
+```
+
+
+```{r}
+# Sensitivity Analysis
+## Sensitivity analysis tests the robustness of the matching process by varying the caliper width and trying different matching methods.
+## This step is crucial to ensure that the results are not overly dependent on the specific parameters chosen for the matching process.
+
+# Varying the caliper width
+caliper_values <- c(0.05, 0.1, 0.15)
+sensitivity_results <- list()
+
+for (caliper in caliper_values) {
+  matchit_result_sensitivity <- matchit(Transplant_Y_N ~ ., data = data_filtered, method = "nearest", caliper = caliper)
+  matched_data_sensitivity <- match.data(matchit_result_sensitivity)
+  reg_sensitivity <- glm(Transplant_Y_N ~ diabetes, data = matched_data_sensitivity, family = binomial)
+  sensitivity_results[[paste0("Caliper_", caliper)]] <- summary(reg_sensitivity)
+}
+
+# Print sensitivity results
+for (result in names(sensitivity_results)) {
+  print(result)
+  print(sensitivity_results[[result]])
+}
+
+# Interpretation:
+## By examining the results at different caliper widths, you can assess whether the matching process remains robust under different assumptions.
+## Significant changes in the results across different caliper values might indicate that the matching process is sensitive to the choice of caliper, which could affect the reliability of the findings.
+```
+
+
+```{r}
+# Sensitivity Analysis with Different Matching Methods
+# This section tests the robustness of the propensity score matching process by trying different matching methods.
+# The objective is to see if the results remain consistent across various matching techniques, which would indicate that the findings are robust and not overly dependent on the choice of the matching method.
+
+# Different matching methods to be tested: "nearest", "optimal", "full"
+#matching_methods <- c("nearest", "optimal", "full")
+#sensitivity_results_methods <- list()
+
+# Loop through each matching method, perform matching, and then run a logistic regression on the matched data
+#for (method in matching_methods) {
+#  matchit_result_method <- matchit(Transplant_Y_N ~ ., data = data_filtered, method = method)
+#  matched_data_method <- match.data(matchit_result_method)
+#  reg_method <- glm(Transplant_Y_N ~ diabetes, data = matched_data_method, family = binomial)
+#  sensitivity_results_methods[[method]] <- summary(reg_method)
+#}
+
+# Print sensitivity results for different methods
+#for (result in names(sensitivity_results_methods)) {
+#  print(result)
+#  print(sensitivity_results_methods[[result]])
+#}
+
+# Interpretation:
+# This sensitivity analysis compares how different matching methods (nearest, optimal, full) impact the results.
+# - **Nearest Neighbor Matching:** Pairs treated units with the closest control units based on propensity score.
+# - **Optimal Matching:** Minimizes the overall distance between matched pairs across the entire sample.
+# - **Full Matching:** Forms matched sets with one or more treated and control units, offering the most flexibility.
+
+# Consistent results across methods indicate that the findings are robust and not dependent on the specific matching method.
+# If the estimated effect of diabetes remains stable across methods, the conclusions are reliable.
+# Significant variability across methods suggests the matching method might influence the outcome, warranting further investigation.
+
+```
+
+
+```{r}
+# Outcome Analysis after Matching
+## Finally, after confirming that the matching process has balanced the covariates, a logistic regression model is fitted to analyze the effect of diabetes on the likelihood of receiving a transplant, now using the matched dataset.
+reg_after <- glm(Transplant_Y_N ~ diabetes, data = matched_data, family = binomial)
+summary(reg_after)
+
+# Interpretation:
+## The regression results before matching showed a significant association between diabetes and the likelihood of receiving a transplant (p < 0.001). 
+## However, after matching, this association was no longer significant (p = 0.842), with an odds ratio close to 1.
+## This suggests that the initial association was likely confounded by other factors, which were successfully controlled for by the matching process. 
+## As a result, the effect of diabetes on receiving a transplant appears to be negligible when accounting for these confounders, 
+## leading to more reliable causal inferences. The matching process has effectively balanced the covariates, reducing bias and providing a clearer understanding of the true effect of diabetes on transplant likelihood.
+```
