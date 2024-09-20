@@ -159,8 +159,9 @@ selected_balance <- balance_table_df %>%
 # Print the selected balance table
 print(selected_balance)
 
-# Define the output file path for saving the balance table
-output_file <- "D:/OneDrive - COLOMBIANA DE TRASPLANTES SAS/metodologicos/psm/analisis/balance_table_waitlist_kidney_brazil.csv"
+# Define the output file path using a temporary directory
+# This ensures that the file will be saved in a generic location, regardless of the user's system setup.
+output_file <- file.path(tempdir(), "balance_table_waitlist_kidney_brazil.csv")
 
 # Save the balance table to a CSV file
 write.csv(selected_balance, output_file, row.names = FALSE)
